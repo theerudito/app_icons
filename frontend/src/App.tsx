@@ -1,13 +1,12 @@
 import { useEffect, useRef, useState, type ChangeEvent, type CSSProperties } from 'react'
 
 import { SaveFile } from '../wailsjs/go/main/App.js'
-import { commitCustomSize, MAX_CUSTOM_SIZE, MIN_CUSTOM_SIZE } from './lib/custom-size'
-import { buildIco, buildSvg, canvasToBlob, drawIcon, type RenderSettings } from './lib/icon-generator'
+import { exportFilename, exportFormat, type ExportPreset } from './lib/export-selection'
+import { buildIco, canvasToBlob, drawIcon, type RenderSettings } from './lib/icon-generator'
 import { sanitizeSvg } from './lib/svg-sanitizer'
 import { assertImageDimensions } from './lib/validation'
 
-type PresetId = 'play' | 'favicon' | 'windows' | 'generic'
-type OutputFormat = 'png' | 'webp' | 'svg'
+type PresetId = ExportPreset
 type SourceKind = 'raster' | 'vector' | ''
 type Variant = { size: number; label: string }
 
@@ -37,14 +36,13 @@ const palette = [
 
 const presets: Array<{ id: PresetId; title: string; detail: string }> = [
   { id: 'play', title: 'Google Play', detail: '512 px PNG' },
-  { id: 'favicon', title: 'Favicon', detail: '3-size ICO' },
-  { id: 'windows', title: 'Windows app', detail: '5-size ICO' },
-  { id: 'generic', title: 'Custom', detail: 'PNG, WebP or SVG' },
+  { id: 'favicon', title: 'ICO', detail: '7 Size' },
+  { id: 'windows', title: 'PNG', detail: '7 Size' },
+  { id: 'generic', title: 'Custom', detail: 'PNG' },
 ]
 
 function getVariants(preset: PresetId, genericSize: number): Variant[] {
-  if (preset === 'favicon') return [16, 32, 48].map(size => ({ size, label: `${size} × ${size}` }))
-  if (preset === 'windows') return [16, 24, 32, 48, 256].map(size => ({ size, label: `${size} × ${size}` }))
+  if (preset === 'favicon' || preset === 'windows') return [16, 32, 48, 64, 128, 256, 512].map(size => ({ size, label: `${size} × ${size}` }))
   if (preset === 'generic') return [{ size: genericSize, label: `${genericSize} × ${genericSize}` }]
   return [{ size: 512, label: '512 × 512' }]
 }
@@ -65,8 +63,6 @@ export default function App() {
   const [cornerRadius, setCornerRadius] = useState(18)
   const [background, setBackground] = useState('#2563eb')
   const [genericSize, setGenericSize] = useState(512)
-  const [genericSizeDraft, setGenericSizeDraft] = useState('512')
-  const [genericFormat, setGenericFormat] = useState<OutputFormat>('png')
   const [selectedSize, setSelectedSize] = useState(512)
   const [previewUrls, setPreviewUrls] = useState<Record<number, string>>({})
   const [status, setStatus] = useState('')
@@ -74,9 +70,17 @@ export default function App() {
   const [isExporting, setIsExporting] = useState(false)
 
   const variants = getVariants(preset, genericSize)
-  const isBundle = preset === 'favicon' || preset === 'windows'
-  const outputFormat = isBundle ? 'ICO' : preset === 'play' ? 'PNG' : genericFormat.toUpperCase()
+  const outputFormat = exportFormat(preset, selectedSize).toUpperCase()
   const selectedPreview = previewUrls[selectedSize] || previewUrls[variants[0].size]
+
+  useEffect(() => {
+    if (!status && !error) return
+    const timer = window.setTimeout(() => {
+      setStatus('')
+      setError('')
+    }, 10_000)
+    return () => window.clearTimeout(timer)
+  }, [status, error])
 
   useEffect(() => {
     const sequence = ++renderSequenceRef.current
@@ -106,24 +110,14 @@ export default function App() {
 
   function selectPreset(nextPreset: PresetId) {
     setPreset(nextPreset)
-    setGenericSizeDraft(String(genericSize))
     setSelectedSize(nextPreset === 'favicon' ? 32 : nextPreset === 'windows' ? 48 : nextPreset === 'generic' ? genericSize : 512)
     setError('')
     setStatus('')
   }
 
   function useGenericSize(size: number) {
-    const nextSize = commitCustomSize(String(size), genericSize)
-    setGenericSize(nextSize)
-    setGenericSizeDraft(String(nextSize))
-    setSelectedSize(nextSize)
-  }
-
-  function commitGenericSize() {
-    const nextSize = commitCustomSize(genericSizeDraft, genericSize)
-    setGenericSize(nextSize)
-    setGenericSizeDraft(String(nextSize))
-    setSelectedSize(nextSize)
+    setGenericSize(size)
+    setSelectedSize(size)
   }
 
   async function loadSource(event: ChangeEvent<HTMLInputElement>) {
@@ -179,30 +173,12 @@ export default function App() {
     setStatus('')
     setIsExporting(true)
     try {
-      let blob: Blob
-      let filename: string
-
-      if (isBundle) {
-        const frames: Blob[] = []
-        for (const variant of variants) {
-          frames.push(await canvasToBlob(drawIcon(sourceImage, variant.size, settings()), 'image/png'))
-        }
-        blob = await buildIco(frames, variants.map(item => item.size))
-        filename = preset === 'favicon' ? 'favicon.ico' : 'windows-app.ico'
-      } else {
-        const size = preset === 'play' ? 512 : selectedSize
-        const canvas = drawIcon(sourceImage, size, settings())
-        const format = preset === 'play' ? 'png' : genericFormat
-        if (format === 'svg') {
-          const png = await canvasToBlob(canvas, 'image/png')
-          const embedded = await blobToDataUrl(png)
-          const svg = buildSvg(embedded, size, settings(), `Rendered icon from ${sourceName}`)
-          blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' })
-        } else {
-          blob = await canvasToBlob(canvas, `image/${format}`)
-        }
-        filename = preset === 'play' ? 'google-play-icon.png' : `app-icon-${size}.${format}`
-      }
+      const size = preset === 'play' ? 512 : selectedSize
+      const format = exportFormat(preset, size)
+      const canvas = drawIcon(sourceImage, size, settings())
+      const png = await canvasToBlob(canvas, 'image/png')
+      const blob = format === 'ico' ? await buildIco([png], [size]) : png
+      const filename = exportFilename(sourceName, size, format)
 
       if (blob.size > MAX_GENERATED_BYTES) throw new Error('The generated file exceeds the 24 MB safety limit.')
       const encoded = (await blobToDataUrl(blob)).split(',')[1]
@@ -234,8 +210,8 @@ export default function App() {
   }
 
   return (
-    <main className="mx-auto min-h-screen w-full max-w-[1420px] bg-[#090c11] px-4 py-4 text-[#edf2f8] [background-image:radial-gradient(circle_at_72%_0,#131d2e_0,transparent_35%)] sm:px-5 sm:py-5 lg:px-8 lg:pt-7 lg:pb-10">
-      <div className="mb-5 grid grid-cols-1 items-stretch gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+    <main className="mx-auto min-h-screen w-full max-w-[1420px] bg-[#090c11] px-4 py-4 text-[#edf2f8] [background-image:radial-gradient(circle_at_72%_0,#131d2e_0,transparent_35%)] sm:px-5 sm:py-5 lg:px-8 lg:pt-4 lg:pb-4">
+      <div className="mb-3 grid grid-cols-1 items-stretch gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
         <nav className="grid grid-cols-2 gap-2 rounded-2xl border border-[#2c3545] bg-[#11161feb] p-1.5 lg:grid-cols-4" aria-label="Output destination">
           {presets.map(item => (
             <button
@@ -258,31 +234,31 @@ export default function App() {
       {error && <div className="mb-4 rounded-xl border border-[#71303c] bg-[#30171d] px-3.5 py-2.5 text-sm text-[#ff9ca7]" role="alert">{error}</div>}
       {status && <div className="mb-4 rounded-xl border border-[#285f49] bg-[#10291f] px-3.5 py-2.5 text-sm text-[#74d7ad]" role="status">{status}</div>}
 
-      <section className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(275px,340px)_minmax(0,1fr)]">
-        <aside className="rounded-2xl border border-[#2c3545] bg-[#11161ff5] p-4 shadow-2xl sm:p-5" aria-label="Icon controls">
-          <div className="mb-5 flex items-center justify-between">
+      <section className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(275px,340px)_minmax(0,1fr)]">
+        <aside className="rounded-2xl border border-[#2c3545] bg-[#11161ff5] p-4 shadow-2xl" aria-label="Icon controls">
+          <div className="mb-3 flex items-center justify-between">
             <div><p className="mb-1 text-[11px] font-extrabold tracking-[.17em] text-[#a6b0c0]">ARTWORK</p><h2 className="text-xl font-extrabold">Composition</h2></div>
             {sourceImage && <span className="max-w-[90px] overflow-hidden text-ellipsis rounded-md border border-[#355d9b] bg-[#172b4d] px-2 py-1 text-[10px] font-extrabold tracking-widest text-[#a9cbff]" title={sourceName}>{sourceKind === 'vector' ? 'SVG' : 'RASTER'}</span>}
           </div>
 
-          <div className="mb-5 rounded-xl border border-[#293c5b] bg-[#151e2e] p-4">
+          <div className="mb-3 rounded-xl border border-[#293c5b] bg-[#151e2e] p-3">
             <div className="flex justify-between gap-3 text-sm font-extrabold"><label htmlFor="scale">Artwork scale</label><output className="text-[#8cb8ff]" htmlFor="scale">{artworkScale}%</output></div>
             <input className="range-control" id="scale" type="range" min="20" max="120" step="1" value={artworkScale} onChange={event => setArtworkScale(Number(event.currentTarget.value))} disabled={!sourceImage} />
             <div className="flex justify-between text-[10px] text-[#a6b0c0]"><span>Contained</span><span>Edge to edge</span></div>
           </div>
 
-          <div className="my-4">
+          <div className="my-2">
             <label className="flex justify-between gap-3 text-sm font-extrabold" htmlFor="padding">Inner padding <span className="text-[#8cb8ff]">{padding}%</span></label>
             <input className="range-control" id="padding" type="range" min="0" max="30" value={padding} onChange={event => setPadding(Number(event.currentTarget.value))} disabled={!sourceImage} />
           </div>
-          <div className="my-4">
+          <div className="my-2">
             <label className="flex justify-between gap-3 text-sm font-extrabold" htmlFor="radius">Corner radius <span className="text-[#8cb8ff]">{cornerRadius}%</span></label>
             <input className="range-control" id="radius" type="range" min="0" max="50" value={cornerRadius} onChange={event => setCornerRadius(Number(event.currentTarget.value))} disabled={!sourceImage} />
           </div>
 
-          <fieldset className="mt-5">
-            <legend className="mb-3 w-full text-sm font-extrabold">Background</legend>
-            <div className="grid grid-cols-6 gap-2.5">
+          <fieldset className="mt-3">
+            <legend className="mb-2 w-full text-sm font-extrabold">Background</legend>
+            <div className="grid grid-cols-6 gap-1.5">
               {palette.map(color => (
                 <button
                   className={`aspect-square min-w-6 cursor-pointer rounded-lg border-2 border-[#0b0f16] bg-[var(--swatch)] shadow-[0_0_0_1px_#465268] transition hover:scale-105 hover:shadow-[0_0_0_2px_#8391a8] disabled:cursor-not-allowed disabled:opacity-35 disabled:saturate-50 ${color.value === 'transparent' ? 'checkerboard' : ''} ${background === color.value ? 'scale-[.88] shadow-[0_0_0_3px_#73a9ff,0_0_0_5px_#0b0f16] hover:scale-[.88] hover:shadow-[0_0_0_3px_#73a9ff,0_0_0_5px_#0b0f16]' : ''}`}
@@ -300,59 +276,50 @@ export default function App() {
           </fieldset>
 
           {preset === 'generic' && (
-            <fieldset className="mt-5 border-t border-[#2c3545] pt-5">
-              <legend className="mb-3 w-full text-sm font-extrabold">Custom output</legend>
-              <div className="flex gap-1.5">
+            <fieldset className="mt-3 border-t border-[#2c3545] pt-3">
+              <legend className="mb-0 w-full text-sm font-extrabold">Custom output</legend>
+              <div className="-mt-2 flex gap-1.5">
                 {[128, 256, 512, 1024].map(size => (
                   <button className={`flex-1 cursor-pointer rounded-lg border px-1 py-2 text-xs transition-colors ${genericSize === size ? 'border-[#548add] bg-[#172b4d] font-extrabold text-[#a9cbff]' : 'border-[#2c3545] bg-[#171e29] hover:border-[#465268] hover:bg-[#202938]'}`} type="button" onClick={() => useGenericSize(size)} key={size}>{size}</button>
                 ))}
               </div>
-              <label className="mt-3 flex items-center gap-2 text-xs font-extrabold text-[#a6b0c0]" htmlFor="size">Size <input className="w-24 rounded-lg border border-[#465268] bg-[#171e29] px-2 py-1.5 text-[#edf2f8] hover:border-[#64738d]" id="size" type="number" min={MIN_CUSTOM_SIZE} max={MAX_CUSTOM_SIZE} value={genericSizeDraft} onChange={event => setGenericSizeDraft(event.currentTarget.value)} onBlur={commitGenericSize} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} /> px</label>
-              <div className="mt-3 flex gap-4 text-xs text-[#a6b0c0]">
-                {(['png', 'webp', 'svg'] as OutputFormat[]).map(format => (
-                  <label className="cursor-pointer" key={format}><input className="accent-[#73a9ff]" type="radio" name="format" value={format} checked={genericFormat === format} onChange={() => setGenericFormat(format)} /> {format.toUpperCase()}</label>
-                ))}
-              </div>
-              {genericFormat === 'svg' && <p className="mt-2.5 text-[11px] leading-relaxed text-[#a6b0c0]">SVG output is a container with the rendered image embedded. Raster sources do not become vector artwork.</p>}
             </fieldset>
           )}
         </aside>
 
-        <section className="flex min-h-[580px] flex-col rounded-2xl border border-[#2c3545] bg-[#11161ff5] p-4 shadow-2xl sm:p-6 lg:min-h-[610px]">
+        <section className="flex min-h-[500px] min-w-0 flex-col rounded-2xl border border-[#2c3545] bg-[#11161ff5] p-4 shadow-2xl sm:p-5 lg:min-h-[530px]">
           <div className="mb-4 flex items-center justify-between">
             <div><p className="mb-1 text-[11px] font-extrabold tracking-[.17em] text-[#a6b0c0]">LIVE OUTPUT</p><h2 className="text-xl font-extrabold">{presets.find(item => item.id === preset)?.title}</h2></div>
             <span className="rounded-md border border-[#355d9b] bg-[#202938] px-2 py-1 text-[10px] font-extrabold tracking-widest">{outputFormat}</span>
           </div>
 
           {!sourceImage ? (
-            <button className="grid min-h-[360px] flex-1 cursor-pointer place-content-center justify-items-center gap-2 rounded-2xl border-2 border-dashed border-[#465268] bg-[#0e131b] text-[#a6b0c0] transition-colors hover:border-[#6484b6] hover:bg-[#121a27]" type="button" onClick={() => fileInputRef.current?.click()}>
+            <button className="grid min-h-[280px] flex-1 cursor-pointer place-content-center justify-items-center gap-2 rounded-2xl border-2 border-dashed border-[#465268] bg-[#0e131b] text-[#a6b0c0] transition-colors hover:border-[#6484b6] hover:bg-[#121a27]" type="button" onClick={() => fileInputRef.current?.click()}>
               <span className="mb-2 grid size-16 place-items-center rounded-2xl border border-[#355d9b] bg-[#172b4d] text-[#8cb8ff]"><svg className="w-7 fill-none stroke-current [stroke-linecap:round] [stroke-linejoin:round]" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17l4.5-5 3.5 4 2.5-3 5.5 6M8 8h.01M5 3h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2z" /></svg></span>
               <strong className="text-lg text-[#edf2f8]">Bring in your artwork</strong>
               <span className="text-sm">PNG, WebP, or SVG up to 15 MB</span>
             </button>
           ) : (
             <>
-              {isBundle && <div className="mb-4 flex items-baseline gap-3 rounded-xl border border-[#645127] bg-[#29220f] px-3 py-2.5 text-xs text-[#f4d78b]"><strong className="whitespace-nowrap">One ICO file</strong><span>Includes all {variants.length} resolutions shown below. Selecting a tile changes the inspection preview; export always includes the complete set.</span></div>}
-
               <div className="checkerboard relative my-1 mb-5 grid aspect-square w-[min(280px,42vh)] place-items-center self-center overflow-hidden rounded-[22px] border border-[#465268] shadow-2xl">
                 <img className="size-full object-contain" src={selectedPreview} alt={`Selected ${selectedSize} pixel icon preview`} />
                 <span className="absolute right-2 bottom-2 rounded-md border border-white/15 bg-[#05080ddb] px-2 py-1 text-[10px]">{selectedSize} × {selectedSize}</span>
               </div>
 
-              <div className="mt-auto grid grid-cols-3 gap-2 sm:grid-cols-5" aria-label="Output variants">
+              <div className="variant-scroll mt-auto flex min-w-0 gap-2 overflow-x-auto pb-3" aria-label="Output variants">
                 {variants.map(variant => (
-                  <button className={`min-w-0 cursor-pointer rounded-xl border p-2 text-left transition-colors ${selectedSize === variant.size ? 'border-[#73a9ff] bg-[#172b4d] shadow-[0_0_0_2px_rgba(115,169,255,.2)]' : 'border-[#2c3545] bg-[#171e29] hover:border-[#465268] hover:bg-[#202938]'}`} type="button" onClick={() => setSelectedSize(variant.size)} key={variant.size}>
+                  <button className={`w-36 shrink-0 cursor-pointer rounded-xl border p-2 text-left transition-colors sm:w-40 ${selectedSize === variant.size ? 'border-[#73a9ff] bg-[#172b4d] shadow-[0_0_0_2px_rgba(115,169,255,.2)]' : 'border-[#2c3545] bg-[#171e29] hover:border-[#465268] hover:bg-[#202938]'}`} type="button" onClick={() => setSelectedSize(variant.size)} key={variant.size}>
                     <span className="checkerboard mb-2 grid aspect-[1.35] w-full place-items-center overflow-hidden rounded-lg border border-[#3b4659]"><img className="h-[78%] w-[58%] object-contain" src={previewUrls[variant.size]} alt="" /></span>
                     <strong className="block overflow-hidden text-ellipsis whitespace-nowrap text-[11px]">{variant.label}</strong>
-                    <small className="mt-0.5 block overflow-hidden text-ellipsis whitespace-nowrap text-[9px] text-[#a6b0c0]">{isBundle ? 'Inside ICO' : outputFormat}</small>
+                    <small className="mt-0.5 block overflow-hidden text-ellipsis whitespace-nowrap text-[9px] text-[#a6b0c0]">{exportFormat(preset, variant.size).toUpperCase()}</small>
                   </button>
                 ))}
               </div>
             </>
           )}
 
-          <div className="mt-5 flex flex-col items-stretch justify-between gap-4 border-t border-[#2c3545] pt-5 sm:flex-row sm:items-center">
-            <div><strong className="block text-sm">{isBundle ? `${variants.length} resolutions in one ICO` : `${selectedSize} × ${selectedSize} ${outputFormat}`}</strong><span className="mt-1 block text-[11px] text-[#a6b0c0]">{sourceImage ? 'Ready for a native save location' : 'Load artwork to enable export'}</span></div>
+          <div className="mt-3 flex flex-col items-stretch justify-between gap-4 border-t border-[#2c3545] pt-3 sm:flex-row sm:items-center">
+            <div><strong className="block text-sm">{selectedSize} × {selectedSize} {outputFormat}</strong><span className="mt-1 block text-[11px] text-[#a6b0c0]">{sourceImage ? 'Ready for a native save location' : 'Load artwork to enable export'}</span></div>
             <button className="cursor-pointer rounded-xl border border-[#83b5ff] bg-[#73a9ff] px-4 py-3 font-extrabold text-[#07101e] shadow-lg transition hover:-translate-y-px hover:border-[#b4d2ff] hover:bg-[#94bdff] active:translate-y-0 disabled:cursor-not-allowed disabled:border-[#2c3545] disabled:bg-[#202938] disabled:text-[#788397] disabled:opacity-70 disabled:shadow-none" type="button" onClick={exportSelection} disabled={!sourceImage || isExporting}>{isExporting ? 'Preparing…' : `Export ${outputFormat}`}</button>
           </div>
         </section>

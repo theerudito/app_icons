@@ -32,3 +32,9 @@
 .range-control::-moz-range-progress { height: 5px; border-radius: 999px; background: #3b82f6; }
 .range-control::-moz-range-thumb { width: 13px; height: 13px; border: 2px solid #d7e6ff; border-radius: 50%; background: #3b82f6; }
 .range-control:disabled { opacity: .4; cursor: not-allowed; }
+
+.variant-scroll { scrollbar-width: thin; scrollbar-color: #548add #171e29; user-select: none; }
+.variant-scroll::-webkit-scrollbar { height: 9px; }
+.variant-scroll::-webkit-scrollbar-track { background: #171e29; border: 1px solid #2c3545; border-radius: 999px; }
+.variant-scroll::-webkit-scrollbar-thumb { background: #548add; border: 2px solid #171e29; border-radius: 999px; }
+.variant-scroll::-webkit-scrollbar-thumb:hover { background: #73a9ff; }

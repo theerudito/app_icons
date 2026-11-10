@@ -69,6 +69,8 @@ export async function buildIco(frames: Blob[], sizes: number[]): Promise<Blob> {
   images.forEach((image, index) => {
     const entry = 6 + index * 16
     const size = sizes[index]
+    // ICO stores 256 as zero; a 512px PNG frame also needs zero in the directory.
+    // Readers that trust the directory over the PNG dimensions may show it as 256px.
     view.setUint8(entry, size >= 256 ? 0 : size)
     view.setUint8(entry + 1, size >= 256 ? 0 : size)
     view.setUint8(entry + 2, 0)
