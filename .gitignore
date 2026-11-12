@@ -4,3 +4,5 @@ build/installer/*.deb
 node_modules
 frontend/dist
 *.exe
+.atl
+.codegraph

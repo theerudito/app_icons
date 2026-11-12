@@ -1,0 +1,198 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (for example, v0.1.0)'
+        required: true
+        default: 'v0.1.0'
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+
+jobs:
+  windows:
+    name: Windows installer
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Normalize release version
+        shell: pwsh
+        run: |
+          $version = "${{ env.VERSION }}".TrimStart('v')
+          "VERSION_NUMBER=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Build Windows application
+        run: go run github.com/wailsapp/wails/v2/cmd/wails@v2.16.0 build -platform windows/amd64 -clean -s -m -nosyncgomod -trimpath -tags webkit2_41
+
+      - name: Build versioned Inno Setup installer
+        shell: pwsh
+        run: |
+          $version = "${{ env.VERSION }}".TrimStart('v')
+          $temporaryScript = "installer.ci.$version.iss"
+          Copy-Item installer.iss $temporaryScript
+          try {
+            $content = Get-Content $temporaryScript -Raw
+            $content = $content -replace '#define MyAppVersion ".*?"', "#define MyAppVersion `"$version`""
+            $content = $content -replace 'VersionInfoVersion=.*', "VersionInfoVersion=$version.0"
+            $content = $content -replace 'VersionInfoProductVersion=.*', "VersionInfoProductVersion=$version.0"
+            $content | Set-Content $temporaryScript -Encoding utf8
+            & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" $temporaryScript
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          finally {
+            Remove-Item $temporaryScript -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Verify installer name
+        shell: pwsh
+        run: |
+          $path = "build/installer/Icons-Setup-$(("${{ env.VERSION }}").TrimStart('v')).exe"
+          if (-not (Test-Path $path)) { throw "Expected installer not found: $path" }
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: icons-windows-${{ env.VERSION }}
+          path: build/installer/Icons-Setup-${{ env.VERSION_NUMBER }}.exe
+          if-no-files-found: error
+
+  linux:
+    name: Linux Debian package
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Normalize release version
+        run: echo "VERSION_NUMBER=${VERSION#v}" >> "$GITHUB_ENV"
+
+      - name: Install Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config dpkg-dev
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Wails CLI
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.16.0
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Build Debian package with the project script
+        env:
+          VERSION: ${{ env.VERSION }}
+        run: PACKAGE_VERSION="${VERSION#v}" ./build/linux/build-deb.sh
+
+      - name: Verify Debian package name
+        run: test -f "build/installer/icons_${VERSION#v}_amd64.deb"
+
+      - name: Upload Debian package
+        uses: actions/upload-artifact@v4
+        with:
+          name: icons-linux-${{ env.VERSION }}
+          path: build/installer/icons_${{ env.VERSION_NUMBER }}_amd64.deb
+          if-no-files-found: error
+
+  macos:
+    name: macOS disk image
+    runs-on: macos-15-intel
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Normalize release version
+        run: echo "VERSION_NUMBER=${VERSION#v}" >> "$GITHUB_ENV"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Build macOS application
+        run: go run github.com/wailsapp/wails/v2/cmd/wails@v2.16.0 build -platform darwin/amd64 -clean -s -m -nosyncgomod -trimpath
+
+      - name: Create versioned DMG
+        run: |
+          mkdir -p build/installer
+          hdiutil create \
+            -volname "Icons ${VERSION#v}" \
+            -srcfolder build/bin/icons.app \
+            -ov \
+            -format UDZO \
+            "build/installer/icons_${VERSION}_darwin_amd64.dmg"
+
+      - name: Verify DMG name
+        run: test -f "build/installer/icons_${VERSION}_darwin_amd64.dmg"
+
+      - name: Upload macOS disk image
+        uses: actions/upload-artifact@v4
+        with:
+          name: icons-macos-${{ env.VERSION }}
+          path: build/installer/icons_${{ env.VERSION_NUMBER }}_darwin_amd64.dmg
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: [windows, linux, macos]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: icons-*
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.VERSION }}
+          name: Icons ${{ env.VERSION }}
+          generate_release_notes: true
+          files: release-assets/*
