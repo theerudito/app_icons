@@ -165,10 +165,10 @@ jobs:
             -srcfolder build/bin/icons.app \
             -ov \
             -format UDZO \
-            "build/installer/icons_${VERSION}_darwin_amd64.dmg"
+            "build/installer/icons_${VERSION_NUMBER}_darwin_amd64.dmg"
 
       - name: Verify DMG name
-        run: test -f "build/installer/icons_${VERSION}_darwin_amd64.dmg"
+        run: test -f "build/installer/icons_${VERSION_NUMBER}_darwin_amd64.dmg"
 
       - name: Upload macOS disk image
         uses: actions/upload-artifact@v4
